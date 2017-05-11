@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -52,6 +53,7 @@ type Command struct {
 	agent             *Agent
 	httpServers       []*HTTPServer
 	dnsServer         *DNSServer
+	wg                sync.WaitGroup
 }
 
 // readConfig is responsible for setup of our configuration using
@@ -451,70 +453,6 @@ func (c *Command) readConfig() *Config {
 	return config
 }
 
-// setupAgent is used to start the agent and various interfaces
-func (c *Command) setupAgent(config *Config, logOutput io.Writer, logWriter *logger.LogWriter) error {
-	c.UI.Output("Starting Consul agent...")
-	agent, err := Create(config, logOutput, logWriter, c.configReloadCh)
-	if err != nil {
-		c.UI.Error(fmt.Sprintf("Error starting agent: %s", err))
-		return err
-	}
-	c.agent = agent
-
-	if config.Ports.HTTP > 0 || config.Ports.HTTPS > 0 {
-		servers, err := NewHTTPServers(agent)
-		if err != nil {
-			agent.Shutdown()
-			c.UI.Error(fmt.Sprintf("Error starting http servers: %s", err))
-			return err
-		}
-		c.httpServers = servers
-	}
-
-	if config.Ports.DNS > 0 {
-		dnsAddr, err := config.ClientListener(config.Addresses.DNS, config.Ports.DNS)
-		if err != nil {
-			agent.Shutdown()
-			c.UI.Error(fmt.Sprintf("Invalid DNS bind address: %s", err))
-			return err
-		}
-
-		server, err := NewDNSServer(agent, &config.DNSConfig, logOutput,
-			config.Domain, dnsAddr.String(), config.DNSRecursors)
-		if err != nil {
-			agent.Shutdown()
-			c.UI.Error(fmt.Sprintf("Error starting dns server: %s", err))
-			return err
-		}
-		c.dnsServer = server
-	}
-
-	// Setup update checking
-	if !config.DisableUpdateCheck {
-		version := config.Version
-		if config.VersionPrerelease != "" {
-			version += fmt.Sprintf("-%s", config.VersionPrerelease)
-		}
-		updateParams := &checkpoint.CheckParams{
-			Product: "consul",
-			Version: version,
-		}
-		if !config.DisableAnonymousSignature {
-			updateParams.SignatureFile = filepath.Join(config.DataDir, "checkpoint-signature")
-		}
-
-		// Schedule a periodic check with expected interval of 24 hours
-		checkpoint.CheckInterval(updateParams, 24*time.Hour, c.checkpointResults)
-
-		// Do an immediate check within the next 30 seconds
-		go func() {
-			time.Sleep(lib.RandomStagger(30 * time.Second))
-			c.checkpointResults(checkpoint.Check(updateParams))
-		}()
-	}
-	return nil
-}
-
 // checkpointResults is used to handler periodic results from our update checker
 func (c *Command) checkpointResults(results *checkpoint.CheckResponse, err error) {
 	if err != nil {
@@ -701,10 +639,9 @@ func (c *Command) Run(args []string) int {
 	// Setup the channel for triggering config reloads
 	c.configReloadCh = make(chan chan error)
 
-	/* Setup telemetry
-	Aggregate on 10 second intervals for 1 minute. Expose the
-	metrics over stderr when there is a SIGUSR1 received.
-	*/
+	// Setup telemetry
+	// Aggregate on 10 second intervals for 1 minute. Expose the
+	// metrics over stderr when there is a SIGUSR1 received.
 	inm := metrics.NewInmemSink(10*time.Second, time.Minute)
 	metrics.DefaultInmemSignal(inm)
 	metricsConf := metrics.DefaultConfig(config.Telemetry.StatsitePrefix)
@@ -795,9 +732,128 @@ func (c *Command) Run(args []string) int {
 	}
 
 	// Create the agent
-	if err := c.setupAgent(config, logOutput, logWriter); err != nil {
+	c.UI.Output("Starting Consul agent...")
+	agent, err := Create(config, logOutput, logWriter, c.configReloadCh)
+	if err != nil {
+		c.UI.Error(fmt.Sprintf("Error starting agent: %s", err))
 		return 1
 	}
+	c.agent = agent
+
+	httpAddrs, err := config.HTTPAddrs()
+	if err != nil {
+		c.agent.Shutdown()
+		c.UI.Error(fmt.Sprintf("Invalid bind address: %s", err))
+		return 1
+	}
+
+	for proto, addrs := range httpAddrs {
+		for _, addr := range addrs {
+			srv := NewHTTPServer(agent)
+			switch addr.(type) {
+			case *net.UnixAddr:
+				switch proto {
+				case "http":
+					c.wg.Add(1)
+					go func() {
+						defer c.wg.Done()
+						if err := srv.ListenAndServeUnix(addr.String(), config.UnixSockets); err != nil {
+							agent.Shutdown()
+							c.UI.Error(fmt.Sprintf("Error starting HTTP server on %q: %s", addr, err))
+						}
+					}()
+
+				default:
+					agent.Shutdown()
+					c.UI.Error(fmt.Sprintf("Invalid protocol: %q", proto))
+					return 1
+				}
+
+			case *net.TCPAddr:
+				switch proto {
+				case "http":
+					c.wg.Add(1)
+					go func() {
+						defer c.wg.Done()
+						if err := srv.ListenAndServe(addr.String()); err != nil {
+							agent.Shutdown()
+							c.UI.Error(fmt.Sprintf("Error starting HTTP server on %q: %s", addr, err))
+						}
+					}()
+
+				case "https":
+					tlscfg, err := config.IncomingTLSConfig()
+					if err != nil {
+						agent.Shutdown()
+						c.UI.Error(fmt.Sprintf("Invalid TLS configuration: %s", err))
+						return 1
+					}
+					c.wg.Add(1)
+					go func() {
+						defer c.wg.Done()
+						if err := srv.ListenAndServeTLS(addr.String(), tlscfg); err != nil {
+							agent.Shutdown()
+							c.UI.Error(fmt.Sprintf("Error starting HTTPS server on %q: %s", addr, err))
+						}
+					}()
+
+				default:
+					agent.Shutdown()
+					c.UI.Error(fmt.Sprintf("Invalid protocol: %q", proto))
+					return 1
+				}
+
+			default:
+				agent.Shutdown()
+				c.UI.Error(fmt.Sprintf("Invalid address type: %T", addr))
+				return 1
+			}
+			c.httpServers = append(c.httpServers, srv)
+		}
+	}
+
+	if config.Ports.DNS > 0 {
+		dnsAddr, err := config.ClientListener(config.Addresses.DNS, config.Ports.DNS)
+		if err != nil {
+			agent.Shutdown()
+			c.UI.Error(fmt.Sprintf("Invalid DNS bind address: %s", err))
+			return 1
+		}
+
+		server, err := NewDNSServer(agent, &config.DNSConfig, logOutput,
+			config.Domain, dnsAddr.String(), config.DNSRecursors)
+		if err != nil {
+			agent.Shutdown()
+			c.UI.Error(fmt.Sprintf("Error starting dns server: %s", err))
+			return 1
+		}
+		c.dnsServer = server
+	}
+
+	// Setup update checking
+	if !config.DisableUpdateCheck {
+		version := config.Version
+		if config.VersionPrerelease != "" {
+			version += fmt.Sprintf("-%s", config.VersionPrerelease)
+		}
+		updateParams := &checkpoint.CheckParams{
+			Product: "consul",
+			Version: version,
+		}
+		if !config.DisableAnonymousSignature {
+			updateParams.SignatureFile = filepath.Join(config.DataDir, "checkpoint-signature")
+		}
+
+		// Schedule a periodic check with expected interval of 24 hours
+		checkpoint.CheckInterval(updateParams, 24*time.Hour, c.checkpointResults)
+
+		// Do an immediate check within the next 30 seconds
+		go func() {
+			time.Sleep(lib.RandomStagger(30 * time.Second))
+			c.checkpointResults(checkpoint.Check(updateParams))
+		}()
+	}
+
 	defer c.agent.Shutdown()
 	if c.dnsServer != nil {
 		defer c.dnsServer.Shutdown()
@@ -820,7 +876,6 @@ func (c *Command) Run(args []string) int {
 
 	// Get the new client http listener addr
 	var httpAddr net.Addr
-	var err error
 	if config.Ports.HTTP != -1 {
 		httpAddr, err = config.ClientListener(config.Addresses.HTTP, config.Ports.HTTP)
 	} else if config.Ports.HTTPS != -1 {

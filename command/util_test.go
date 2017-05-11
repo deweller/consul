@@ -2,9 +2,11 @@ package command
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,25 +31,38 @@ func init() {
 	version.Version = "0.8.0"
 }
 
-type agentWrapper struct {
-	dir      string
-	config   *agent.Config
+type server struct {
 	agent    *agent.Agent
+	config   *agent.Config
 	http     *agent.HTTPServer
 	httpAddr string
+	dir      string
+	wg       sync.WaitGroup
 }
 
-func (a *agentWrapper) Shutdown() {
+func (s *server) Start() {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		if err := s.http.ListenAndServe(s.httpAddr); err != nil {
+			log.Print(err)
+			// a.agent.logger.Print(err)
+		}
+	}()
+}
+
+func (a *server) Shutdown() {
 	a.agent.Shutdown()
 	a.http.Shutdown()
+	a.wg.Wait()
 	os.RemoveAll(a.dir)
 }
 
-func testAgent(t *testing.T) *agentWrapper {
+func testAgent(t *testing.T) *server {
 	return testAgentWithConfig(t, nil)
 }
 
-func testAgentWithAPIClient(t *testing.T) (*agentWrapper, *api.Client) {
+func testAgentWithAPIClient(t *testing.T) (*server, *api.Client) {
 	agent := testAgentWithConfig(t, func(c *agent.Config) {})
 	client, err := api.NewClient(&api.Config{Address: agent.httpAddr})
 	if err != nil {
@@ -56,46 +71,34 @@ func testAgentWithAPIClient(t *testing.T) (*agentWrapper, *api.Client) {
 	return agent, client
 }
 
-func testAgentWithConfig(t *testing.T, cb func(c *agent.Config)) *agentWrapper {
+func testAgentWithConfig(t *testing.T, cb func(c *agent.Config)) *server {
 	return testAgentWithConfigReload(t, cb, nil)
 }
 
-func testAgentWithConfigReload(t *testing.T, cb func(c *agent.Config), reloadCh chan chan error) *agentWrapper {
-	lw := logger.NewLogWriter(512)
+func testAgentWithConfigReload(t *testing.T, cb func(c *agent.Config), reloadCh chan chan error) *server {
 	conf := nextConfig()
 	if cb != nil {
 		cb(conf)
 	}
 
-	dir := testutil.TempDir(t, "agent")
-	conf.DataDir = dir
-
-	a, err := agent.Create(conf, lw, nil, reloadCh)
+	conf.DataDir = testutil.TempDir(t, "agent")
+	a, err := agent.Create(conf, logger.NewLogWriter(512), nil, reloadCh)
 	if err != nil {
-		os.RemoveAll(dir)
-		t.Fatalf(fmt.Sprintf("err: %v", err))
+		os.RemoveAll(conf.DataDir)
+		t.Fatalf("err: %v", err)
 	}
 
 	conf.Addresses.HTTP = "127.0.0.1"
-	httpAddr := fmt.Sprintf("127.0.0.1:%d", conf.Ports.HTTP)
-	http, err := agent.NewHTTPServers(a)
-	if err != nil {
-		os.RemoveAll(dir)
-		t.Fatalf(fmt.Sprintf("err: %v", err))
-	}
-
-	if http == nil || len(http) == 0 {
-		os.RemoveAll(dir)
-		t.Fatalf(fmt.Sprintf("Could not create HTTP server to listen on: %s", httpAddr))
-	}
-
-	return &agentWrapper{
-		dir:      dir,
-		config:   conf,
+	addr := fmt.Sprintf("%s:%d", conf.Addresses.HTTP, conf.Ports.HTTP)
+	w := &server{
 		agent:    a,
-		http:     http[0],
-		httpAddr: httpAddr,
+		config:   conf,
+		http:     agent.NewHTTPServer(a),
+		httpAddr: addr,
+		dir:      conf.DataDir,
 	}
+	w.Start()
+	return w
 }
 
 func nextConfig() *agent.Config {

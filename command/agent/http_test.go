@@ -59,8 +59,12 @@ RECONF:
 		cb(conf)
 	}
 
+	httpAddrs, err := conf.HTTPAddrs()
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
 	dir, agent := makeAgentLog(t, conf, l, logWriter)
-	servers, err := NewHTTPServers(agent)
+	servers, err := NewHTTPServers(agent, httpAddrs)
 	if err != nil {
 		if configTry < 3 {
 			goto RECONF
@@ -159,8 +163,12 @@ func TestHTTPServer_UnixSocket_FileExists(t *testing.T) {
 	dir, agent := makeAgent(t, conf)
 	defer os.RemoveAll(dir)
 
+	httpAddrs, err := conf.HTTPAddrs()
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
 	// Try to start the server with the same path anyways.
-	if _, err := NewHTTPServers(agent); err != nil {
+	if _, err := NewHTTPServers(agent, httpAddrs); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
@@ -578,7 +586,7 @@ func TestEnableWebUI(t *testing.T) {
 		req, _ := http.NewRequest("GET", "/ui/", nil)
 		// Perform the request
 		resp := httptest.NewRecorder()
-		s.mux.ServeHTTP(resp, req)
+		s.srv.Handler.ServeHTTP(resp, req)
 
 		// Check the result
 		if resp.Code != 200 {
