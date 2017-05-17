@@ -22,6 +22,7 @@ import (
 	"github.com/hashicorp/consul/logger"
 	"github.com/hashicorp/consul/testrpc"
 	"github.com/hashicorp/consul/testutil"
+	"github.com/hashicorp/consul/testutil/retry"
 	"github.com/hashicorp/consul/types"
 	"github.com/hashicorp/consul/version"
 	"github.com/hashicorp/go-uuid"
@@ -47,6 +48,28 @@ func init() {
 }
 
 var offset uint64 = basePortNumber
+
+type TestAgent struct {
+	*Agent
+	srv *HTTPServer
+	URL string
+}
+
+func NewTestAgent(t *testing.T, c *Config) *TestAgent {
+	_, a := makeAgent(t, c)
+	url := fmt.Sprintf("http://%s:%d", a.httpServers[0].addr)
+	retry.Run(t, func(r *retry.R) {
+		if len(a.httpServers) == 0 || a.httpServers[0].srv == nil {
+			r.Fatal("waiting for server")
+		}
+	})
+	return &TestAgent{a, a.httpServers[0], url}
+}
+
+func (a *TestAgent) Shutdown() {
+	a.Agent.Shutdown()
+	os.RemoveAll(a.config.DataDir)
+}
 
 func nextConfig() *Config {
 	idx := int(atomic.AddUint64(&offset, numPortsPerIndex))

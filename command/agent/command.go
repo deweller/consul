@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -51,9 +50,6 @@ type Command struct {
 	logFilter         *logutils.LevelFilter
 	logOutput         io.Writer
 	agent             *Agent
-	httpServers       []*HTTPServer
-	dnsServer         *DNSServer
-	wg                sync.WaitGroup
 }
 
 // readConfig is responsible for setup of our configuration using
@@ -740,96 +736,6 @@ func (c *Command) Run(args []string) int {
 	}
 	c.agent = agent
 
-	httpAddrs, err := config.HTTPAddrs()
-	if err != nil {
-		c.agent.Shutdown()
-		c.UI.Error(fmt.Sprintf("Invalid bind address: %s", err))
-		return 1
-	}
-
-	for proto, addrs := range httpAddrs {
-		for _, addr := range addrs {
-			srv := NewHTTPServer(agent)
-			switch addr.(type) {
-			case *net.UnixAddr:
-				switch proto {
-				case "http":
-					c.wg.Add(1)
-					go func() {
-						defer c.wg.Done()
-						if err := srv.ListenAndServeUnix(addr.String(), config.UnixSockets); err != nil {
-							agent.Shutdown()
-							c.UI.Error(fmt.Sprintf("Error starting HTTP server on %q: %s", addr, err))
-						}
-					}()
-
-				default:
-					agent.Shutdown()
-					c.UI.Error(fmt.Sprintf("Invalid protocol: %q", proto))
-					return 1
-				}
-
-			case *net.TCPAddr:
-				switch proto {
-				case "http":
-					c.wg.Add(1)
-					go func() {
-						defer c.wg.Done()
-						if err := srv.ListenAndServe(addr.String()); err != nil {
-							agent.Shutdown()
-							c.UI.Error(fmt.Sprintf("Error starting HTTP server on %q: %s", addr, err))
-						}
-					}()
-
-				case "https":
-					tlscfg, err := config.IncomingTLSConfig()
-					if err != nil {
-						agent.Shutdown()
-						c.UI.Error(fmt.Sprintf("Invalid TLS configuration: %s", err))
-						return 1
-					}
-					c.wg.Add(1)
-					go func() {
-						defer c.wg.Done()
-						if err := srv.ListenAndServeTLS(addr.String(), tlscfg); err != nil {
-							agent.Shutdown()
-							c.UI.Error(fmt.Sprintf("Error starting HTTPS server on %q: %s", addr, err))
-						}
-					}()
-
-				default:
-					agent.Shutdown()
-					c.UI.Error(fmt.Sprintf("Invalid protocol: %q", proto))
-					return 1
-				}
-
-			default:
-				agent.Shutdown()
-				c.UI.Error(fmt.Sprintf("Invalid address type: %T", addr))
-				return 1
-			}
-			c.httpServers = append(c.httpServers, srv)
-		}
-	}
-
-	if config.Ports.DNS > 0 {
-		dnsAddr, err := config.ClientListener(config.Addresses.DNS, config.Ports.DNS)
-		if err != nil {
-			agent.Shutdown()
-			c.UI.Error(fmt.Sprintf("Invalid DNS bind address: %s", err))
-			return 1
-		}
-
-		server, err := NewDNSServer(agent, &config.DNSConfig, logOutput,
-			config.Domain, dnsAddr.String(), config.DNSRecursors)
-		if err != nil {
-			agent.Shutdown()
-			c.UI.Error(fmt.Sprintf("Error starting dns server: %s", err))
-			return 1
-		}
-		c.dnsServer = server
-	}
-
 	// Setup update checking
 	if !config.DisableUpdateCheck {
 		version := config.Version
@@ -855,12 +761,6 @@ func (c *Command) Run(args []string) int {
 	}
 
 	defer c.agent.Shutdown()
-	if c.dnsServer != nil {
-		defer c.dnsServer.Shutdown()
-	}
-	for _, server := range c.httpServers {
-		defer server.Shutdown()
-	}
 
 	// Join startup nodes if specified
 	if err := c.startupJoin(config); err != nil {

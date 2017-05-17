@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,69 +8,26 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/armon/go-metrics"
 	"github.com/hashicorp/consul/consul/structs"
-	"github.com/hashicorp/consul/tlsutil"
 	"github.com/mitchellh/mapstructure"
 )
 
-// HTTPServer is used to wrap an Agent and expose various API's
-// in a RESTful manner
+// HTTPServer provides an HTTP api for an agent.
 type HTTPServer struct {
+	addr   string
 	agent  *Agent
 	logger *log.Logger
 	srv    *http.Server
 }
 
-func NewHTTPServer(a *Agent) *HTTPServer {
-	return &HTTPServer{agent: a, logger: a.logger}
-}
-
-func (s *HTTPServer) ListenAndServe(addr string) error {
-	l, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
-	return s.Serve(l)
-}
-
-func (s *HTTPServer) ListenAndServeTLS(addr string, cfg *tls.Config) error {
-	l, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
-	l = tls.NewListener(tcpKeepAliveListener{l.(*net.TCPListener)}, cfg)
-	if err != nil {
-		return err
-	}
-	return s.Serve(l)
-}
-
-func (s *HTTPServer) ListenAndServeUnix(addr string, perm FilePermissions) error {
-	if _, err := os.Stat(addr); !os.IsNotExist(err) {
-		s.agent.logger.Printf("[WARN] agent: Replacing socket %q", addr)
-	}
-	if err := os.Remove(addr); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("error removing socket file: %s", err)
-	}
-	l, err := net.Listen("unix", addr)
-	if err != nil {
-		return err
-	}
-	if err := setFilePermissions(addr, perm); err != nil {
-		return fmt.Errorf("Failed setting up HTTP socket: %s", err)
-	}
-	return s.Serve(l)
-}
-
 func (s *HTTPServer) Serve(l net.Listener) error {
 	s.srv = &http.Server{
-		Addr:    l.Addr().String(),
+		Addr:    s.addr,
 		Handler: s.handler(s.agent.config.EnableDebug),
 	}
 	return s.srv.Serve(l)
@@ -499,38 +455,4 @@ func (s *HTTPServer) parse(resp http.ResponseWriter, req *http.Request, dc *stri
 		return true
 	}
 	return parseWait(resp, req, b)
-}
-
-func tlsConfig(config *Config) (*tls.Config, error) {
-	tc := &tlsutil.Config{
-		VerifyIncoming:           config.VerifyIncoming || config.VerifyIncomingHTTPS,
-		VerifyOutgoing:           config.VerifyOutgoing,
-		CAFile:                   config.CAFile,
-		CAPath:                   config.CAPath,
-		CertFile:                 config.CertFile,
-		KeyFile:                  config.KeyFile,
-		NodeName:                 config.NodeName,
-		ServerName:               config.ServerName,
-		TLSMinVersion:            config.TLSMinVersion,
-		CipherSuites:             config.TLSCipherSuites,
-		PreferServerCipherSuites: config.TLSPreferServerCipherSuites,
-	}
-	return tc.IncomingTLSConfig()
-}
-
-// tcpKeepAliveListener sets TCP keep-alive timeouts on accepted
-// connections. It's used by NewHttpServer so
-// dead TCP connections eventually go away.
-type tcpKeepAliveListener struct {
-	*net.TCPListener
-}
-
-func (ln tcpKeepAliveListener) Accept() (c net.Conn, err error) {
-	tc, err := ln.AcceptTCP()
-	if err != nil {
-		return
-	}
-	tc.SetKeepAlive(true)
-	tc.SetKeepAlivePeriod(30 * time.Second)
-	return tc, nil
 }
