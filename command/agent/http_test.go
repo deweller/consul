@@ -20,59 +20,9 @@ import (
 	"time"
 
 	"github.com/hashicorp/consul/consul/structs"
-	"github.com/hashicorp/consul/logger"
-	"github.com/hashicorp/consul/testrpc"
 	"github.com/hashicorp/consul/testutil"
 	"github.com/hashicorp/go-cleanhttp"
 )
-
-func makeHTTPServer(t *testing.T) (string, *HTTPServer) {
-	return makeHTTPServerWithConfig(t, nil)
-}
-
-func makeHTTPServerWithConfig(t *testing.T, cb func(c *Config)) (string, *HTTPServer) {
-	return makeHTTPServerWithConfigLog(t, cb, nil, nil)
-}
-
-func makeHTTPServerWithACLs(t *testing.T) (string, *HTTPServer) {
-	t.Skip("needs refactor to TestAgent")
-	return "", nil
-	//dir, srv := makeHTTPServerWithConfig(t, func(c *Config) {
-	//	c.ACLDatacenter = c.Datacenter
-	//	c.ACLDefaultPolicy = "deny"
-	//	c.ACLMasterToken = "root"
-	//	c.ACLAgentToken = "root"
-	//	c.ACLAgentMasterToken = "towel"
-	//	c.ACLEnforceVersion8 = Bool(true)
-	//})
-
-	//// Need a leader to look up ACLs, so wait here so we don't need to
-	//// repeat this in each test.
-	//testrpc.WaitForLeader(t, srv.agent.RPC, "dc1")
-	//return dir, srv
-}
-
-func makeHTTPServerWithConfigLog(t *testing.T, cb func(c *Config), l io.Writer, logWriter *logger.LogWriter) (string, *HTTPServer) {
-	t.Skip("needs refactor to TestAgent")
-	return "", nil
-
-	//conf := nextConfig()
-	//if cb != nil {
-	//	cb(conf)
-	//}
-	//return makeAgentLog(t, conf, l, logWriter)
-}
-
-func nextACLConfig() *Config {
-	c := nextConfig()
-	c.ACLDatacenter = c.Datacenter
-	c.ACLDefaultPolicy = "deny"
-	c.ACLMasterToken = "root"
-	c.ACLAgentToken = "root"
-	c.ACLAgentMasterToken = "towel"
-	c.ACLEnforceVersion8 = Bool(true)
-	return c
-}
 
 func TestHTTPServer_UnixSocket(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -83,17 +33,16 @@ func TestHTTPServer_UnixSocket(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 	socket := filepath.Join(tempDir, "test.sock")
 
-	dir, srv := makeHTTPServerWithConfig(t, func(c *Config) {
-		c.Addresses.HTTP = "unix://" + socket
+	c := nextConfig()
+	c.Addresses.HTTP = "unix://" + socket
 
-		// Only testing mode, since uid/gid might not be settable
-		// from test environment.
-		c.UnixSockets = UnixSocketConfig{}
-		c.UnixSockets.Perms = "0777"
-	})
-	defer os.RemoveAll(dir)
-	defer srv.Shutdown()
-	defer srv.agent.Shutdown()
+	// Only testing mode, since uid/gid might not be settable
+	// from test environment.
+	c.UnixSockets = UnixSocketConfig{}
+	c.UnixSockets.Perms = "0777"
+
+	a := NewTestAgent(t, c)
+	defer a.Shutdown()
 
 	// Ensure the socket was created
 	if _, err := os.Stat(socket); err != nil {
@@ -110,7 +59,7 @@ func TestHTTPServer_UnixSocket(t *testing.T) {
 	}
 
 	// Ensure we can get a response from the socket.
-	path := socketPath(srv.agent.config.Addresses.HTTP)
+	path := socketPath(a.config.Addresses.HTTP)
 	trans := cleanhttp.DefaultTransport()
 	trans.DialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
 		return net.Dial("unix", path)
@@ -154,21 +103,10 @@ func TestHTTPServer_UnixSocket_FileExists(t *testing.T) {
 		t.Fatalf("not a regular file: %s", socket)
 	}
 
-	conf := nextConfig()
-	conf.Addresses.HTTP = "unix://" + socket
-
-	dir, agent := makeAgent(t, conf)
-	defer os.RemoveAll(dir)
-	defer agent.Shutdown()
-
-	// httpAddrs, err := conf.HTTPAddrs()
-	// if err != nil {
-	// 	t.Fatalf("err: %s", err)
-	// }
-	// Try to start the server with the same path anyways.
-	//if _, err := NewHTTPServers(agent, httpAddrs); err != nil {
-	//t.Fatalf("err: %s", err)
-	//}
+	c := nextConfig()
+	c.Addresses.HTTP = "unix://" + socket
+	a := NewTestAgent(t, c)
+	defer a.Shutdown()
 
 	// Ensure the file was replaced by the socket
 	fi, err = os.Stat(socket)
@@ -240,12 +178,9 @@ func TestSetMeta(t *testing.T) {
 }
 
 func TestHTTPAPI_TranslateAddrHeader(t *testing.T) {
-	// Header should not be present if address translation is off.
-	{
-		dir, srv := makeHTTPServer(t)
-		defer os.RemoveAll(dir)
-		defer srv.Shutdown()
-		defer srv.agent.Shutdown()
+	t.Run("translation off", func(t *testing.T) {
+		a := NewTestAgent(t, nextConfig())
+		defer a.Shutdown()
 
 		resp := httptest.NewRecorder()
 		handler := func(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
@@ -253,21 +188,20 @@ func TestHTTPAPI_TranslateAddrHeader(t *testing.T) {
 		}
 
 		req, _ := http.NewRequest("GET", "/v1/agent/self", nil)
-		srv.wrap(handler)(resp, req)
+		a.srv.wrap(handler)(resp, req)
 
 		translate := resp.Header().Get("X-Consul-Translate-Addresses")
 		if translate != "" {
 			t.Fatalf("bad: expected %q, got %q", "", translate)
 		}
-	}
 
-	// Header should be set to true if it's turned on.
-	{
-		dir, srv := makeHTTPServer(t)
-		srv.agent.config.TranslateWanAddrs = true
-		defer os.RemoveAll(dir)
-		defer srv.Shutdown()
-		defer srv.agent.Shutdown()
+	})
+
+	t.Run("translation on", func(t *testing.T) {
+		c := nextConfig()
+		c.TranslateWanAddrs = true
+		a := NewTestAgent(t, c)
+		defer a.Shutdown()
 
 		resp := httptest.NewRecorder()
 		handler := func(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
@@ -275,25 +209,23 @@ func TestHTTPAPI_TranslateAddrHeader(t *testing.T) {
 		}
 
 		req, _ := http.NewRequest("GET", "/v1/agent/self", nil)
-		srv.wrap(handler)(resp, req)
+		a.srv.wrap(handler)(resp, req)
 
 		translate := resp.Header().Get("X-Consul-Translate-Addresses")
 		if translate != "true" {
 			t.Fatalf("bad: expected %q, got %q", "true", translate)
 		}
-	}
+	})
 }
 
 func TestHTTPAPIResponseHeaders(t *testing.T) {
-	dir, srv := makeHTTPServer(t)
-	srv.agent.config.HTTPAPIResponseHeaders = map[string]string{
+	c := nextConfig()
+	c.HTTPAPIResponseHeaders = map[string]string{
 		"Access-Control-Allow-Origin": "*",
 		"X-XSS-Protection":            "1; mode=block",
 	}
-
-	defer os.RemoveAll(dir)
-	defer srv.Shutdown()
-	defer srv.agent.Shutdown()
+	a := NewTestAgent(t, c)
+	defer a.Shutdown()
 
 	resp := httptest.NewRecorder()
 
@@ -302,7 +234,7 @@ func TestHTTPAPIResponseHeaders(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest("GET", "/v1/agent/self", nil)
-	srv.wrap(handler)(resp, req)
+	a.srv.wrap(handler)(resp, req)
 
 	origin := resp.Header().Get("Access-Control-Allow-Origin")
 	if origin != "*" {
@@ -316,11 +248,8 @@ func TestHTTPAPIResponseHeaders(t *testing.T) {
 }
 
 func TestContentTypeIsJSON(t *testing.T) {
-	dir, srv := makeHTTPServer(t)
-
-	defer os.RemoveAll(dir)
-	defer srv.Shutdown()
-	defer srv.agent.Shutdown()
+	a := NewTestAgent(t, nextConfig())
+	defer a.Shutdown()
 
 	resp := httptest.NewRecorder()
 
@@ -330,7 +259,7 @@ func TestContentTypeIsJSON(t *testing.T) {
 	}
 
 	req, _ := http.NewRequest("GET", "/v1/kv/key", nil)
-	srv.wrap(handler)(resp, req)
+	a.srv.wrap(handler)(resp, req)
 
 	contentType := resp.Header().Get("Content-Type")
 
@@ -340,21 +269,19 @@ func TestContentTypeIsJSON(t *testing.T) {
 }
 
 func TestHTTP_wrap_obfuscateLog(t *testing.T) {
-	dir, srv := makeHTTPServer(t)
-	defer os.RemoveAll(dir)
-	defer srv.Shutdown()
-	defer srv.agent.Shutdown()
+	a := NewTestAgent(t, nextConfig())
+	defer a.Shutdown()
 
 	// Attach a custom logger so we can inspect it
 	buf := &bytes.Buffer{}
-	srv.logger = log.New(buf, "", log.LstdFlags)
+	a.srv.logger = log.New(buf, "", log.LstdFlags)
 
 	resp := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/some/url?token=secret1&token=secret2", nil)
 	handler := func(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
 		return nil, nil
 	}
-	srv.wrap(handler)(resp, req)
+	a.srv.wrap(handler)(resp, req)
 
 	// Make sure no tokens from the URL show up in the log
 	if strings.Contains(buf.String(), "secret") {
@@ -371,10 +298,8 @@ func TestPrettyPrintBare(t *testing.T) {
 }
 
 func testPrettyPrint(pretty string, t *testing.T) {
-	dir, srv := makeHTTPServer(t)
-	defer os.RemoveAll(dir)
-	defer srv.Shutdown()
-	defer srv.agent.Shutdown()
+	a := NewTestAgent(t, nextConfig())
+	defer a.Shutdown()
 
 	r := &structs.DirEntry{Key: "key"}
 
@@ -385,7 +310,7 @@ func testPrettyPrint(pretty string, t *testing.T) {
 
 	urlStr := "/v1/kv/key?" + pretty
 	req, _ := http.NewRequest("GET", urlStr, nil)
-	srv.wrap(handler)(resp, req)
+	a.srv.wrap(handler)(resp, req)
 
 	expected, _ := json.MarshalIndent(r, "", "    ")
 	expected = append(expected, "\n"...)
@@ -400,16 +325,14 @@ func testPrettyPrint(pretty string, t *testing.T) {
 }
 
 func TestParseSource(t *testing.T) {
-	dir, srv := makeHTTPServer(t)
-	defer os.RemoveAll(dir)
-	defer srv.Shutdown()
-	defer srv.agent.Shutdown()
+	a := NewTestAgent(t, nextConfig())
+	defer a.Shutdown()
 
 	// Default is agent's DC and no node (since the user didn't care, then
 	// just give them the cheapest possible query).
 	req, _ := http.NewRequest("GET", "/v1/catalog/nodes", nil)
 	source := structs.QuerySource{}
-	srv.parseSource(req, &source)
+	a.srv.parseSource(req, &source)
 	if source.Datacenter != "dc1" || source.Node != "" {
 		t.Fatalf("bad: %v", source)
 	}
@@ -417,7 +340,7 @@ func TestParseSource(t *testing.T) {
 	// Adding the source parameter should set that node.
 	req, _ = http.NewRequest("GET", "/v1/catalog/nodes?near=bob", nil)
 	source = structs.QuerySource{}
-	srv.parseSource(req, &source)
+	a.srv.parseSource(req, &source)
 	if source.Datacenter != "dc1" || source.Node != "bob" {
 		t.Fatalf("bad: %v", source)
 	}
@@ -426,7 +349,7 @@ func TestParseSource(t *testing.T) {
 	// looked up correctly on the receiving end.
 	req, _ = http.NewRequest("GET", "/v1/catalog/nodes?near=bob&dc=foo", nil)
 	source = structs.QuerySource{}
-	srv.parseSource(req, &source)
+	a.srv.parseSource(req, &source)
 	if source.Datacenter != "foo" || source.Node != "bob" {
 		t.Fatalf("bad: %v", source)
 	}
@@ -434,8 +357,8 @@ func TestParseSource(t *testing.T) {
 	// The magic "_agent" node name will use the agent's local node name.
 	req, _ = http.NewRequest("GET", "/v1/catalog/nodes?near=_agent", nil)
 	source = structs.QuerySource{}
-	srv.parseSource(req, &source)
-	if source.Datacenter != "dc1" || source.Node != srv.agent.config.NodeName {
+	a.srv.parseSource(req, &source)
+	if source.Datacenter != "dc1" || source.Node != a.config.NodeName {
 		t.Fatalf("bad: %v", source)
 	}
 }
@@ -531,6 +454,9 @@ func TestParseConsistency_Invalid(t *testing.T) {
 
 // Test ACL token is resolved in correct order
 func TestACLResolution(t *testing.T) {
+	a := NewTestAgent(t, nextConfig())
+	defer a.Shutdown()
+
 	var token string
 	// Request without token
 	req, _ := http.NewRequest("GET", "/v1/catalog/nodes", nil)
@@ -544,55 +470,54 @@ func TestACLResolution(t *testing.T) {
 	reqBothTokens, _ := http.NewRequest("GET", "/v1/catalog/nodes?token=baz", nil)
 	reqBothTokens.Header.Add("X-Consul-Token", "zap")
 
-	httpTest(t, func(srv *HTTPServer) {
-		// Check when no token is set
-		srv.agent.config.ACLToken = ""
-		srv.parseToken(req, &token)
-		if token != "" {
-			t.Fatalf("bad: %s", token)
-		}
+	// Check when no token is set
+	a.config.ACLToken = ""
+	a.srv.parseToken(req, &token)
+	if token != "" {
+		t.Fatalf("bad: %s", token)
+	}
 
-		// Check when ACLToken set
-		srv.agent.config.ACLToken = "agent"
-		srv.parseToken(req, &token)
-		if token != "agent" {
-			t.Fatalf("bad: %s", token)
-		}
+	// Check when ACLToken set
+	a.config.ACLToken = "agent"
+	a.srv.parseToken(req, &token)
+	if token != "agent" {
+		t.Fatalf("bad: %s", token)
+	}
 
-		// Explicit token has highest precedence
-		srv.parseToken(reqToken, &token)
-		if token != "foo" {
-			t.Fatalf("bad: %s", token)
-		}
+	// Explicit token has highest precedence
+	a.srv.parseToken(reqToken, &token)
+	if token != "foo" {
+		t.Fatalf("bad: %s", token)
+	}
 
-		// Header token has precedence over agent token
-		srv.parseToken(reqHeaderToken, &token)
-		if token != "bar" {
-			t.Fatalf("bad: %s", token)
-		}
+	// Header token has precedence over agent token
+	a.srv.parseToken(reqHeaderToken, &token)
+	if token != "bar" {
+		t.Fatalf("bad: %s", token)
+	}
 
-		// Querystring token has precedence over header and agent tokens
-		srv.parseToken(reqBothTokens, &token)
-		if token != "baz" {
-			t.Fatalf("bad: %s", token)
-		}
-	})
+	// Querystring token has precedence over header and agent tokens
+	a.srv.parseToken(reqBothTokens, &token)
+	if token != "baz" {
+		t.Fatalf("bad: %s", token)
+	}
 }
 
 func TestEnableWebUI(t *testing.T) {
-	httpTestWithConfig(t, func(s *HTTPServer) {
-		req, _ := http.NewRequest("GET", "/ui/", nil)
-		// Perform the request
-		resp := httptest.NewRecorder()
-		s.srv.Handler.ServeHTTP(resp, req)
+	c := nextConfig()
+	c.EnableUI = true
+	a := NewTestAgent(t, c)
+	defer a.Shutdown()
 
-		// Check the result
-		if resp.Code != 200 {
-			t.Fatalf("should handle ui")
-		}
-	}, func(c *Config) {
-		c.EnableUI = true
-	})
+	req, _ := http.NewRequest("GET", "/ui/", nil)
+	// Perform the request
+	resp := httptest.NewRecorder()
+	a.srv.srv.Handler.ServeHTTP(resp, req)
+
+	// Check the result
+	if resp.Code != 200 {
+		t.Fatalf("should handle ui")
+	}
 }
 
 // assertIndex tests that X-Consul-Index is set and non-zero
@@ -623,19 +548,6 @@ func getIndex(t *testing.T, resp *httptest.ResponseRecorder) uint64 {
 		t.Fatalf("Bad: %v", header)
 	}
 	return uint64(val)
-}
-
-func httpTest(t *testing.T, f func(srv *HTTPServer)) {
-	httpTestWithConfig(t, f, nil)
-}
-
-func httpTestWithConfig(t *testing.T, f func(srv *HTTPServer), cb func(c *Config)) {
-	dir, srv := makeHTTPServerWithConfig(t, cb)
-	defer os.RemoveAll(dir)
-	defer srv.Shutdown()
-	defer srv.agent.Shutdown()
-	testrpc.WaitForLeader(t, srv.agent.RPC, "dc1")
-	f(srv)
 }
 
 func isPermissionDenied(err error) bool {

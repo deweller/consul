@@ -13,39 +13,43 @@ import (
 )
 
 func TestTxnEndpoint_Bad_JSON(t *testing.T) {
-	httpTest(t, func(srv *HTTPServer) {
-		buf := bytes.NewBuffer([]byte("{"))
-		req, _ := http.NewRequest("PUT", "/v1/txn", buf)
-		resp := httptest.NewRecorder()
-		if _, err := srv.Txn(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 400 {
-			t.Fatalf("expected 400, got %d", resp.Code)
-		}
-		if !bytes.Contains(resp.Body.Bytes(), []byte("Failed to parse")) {
-			t.Fatalf("expected conflicting args error")
-		}
-	})
+	a := NewTestAgent(t, nextConfig())
+	defer a.Shutdown()
+
+	buf := bytes.NewBuffer([]byte("{"))
+	req, _ := http.NewRequest("PUT", "/v1/txn", buf)
+	resp := httptest.NewRecorder()
+	if _, err := a.srv.Txn(resp, req); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if resp.Code != 400 {
+		t.Fatalf("expected 400, got %d", resp.Code)
+	}
+	if !bytes.Contains(resp.Body.Bytes(), []byte("Failed to parse")) {
+		t.Fatalf("expected conflicting args error")
+	}
 }
 
 func TestTxnEndpoint_Bad_Method(t *testing.T) {
-	httpTest(t, func(srv *HTTPServer) {
-		buf := bytes.NewBuffer([]byte("{}"))
-		req, _ := http.NewRequest("GET", "/v1/txn", buf)
-		resp := httptest.NewRecorder()
-		if _, err := srv.Txn(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 405 {
-			t.Fatalf("expected 405, got %d", resp.Code)
-		}
-	})
+	a := NewTestAgent(t, nextConfig())
+	defer a.Shutdown()
+
+	buf := bytes.NewBuffer([]byte("{}"))
+	req, _ := http.NewRequest("GET", "/v1/txn", buf)
+	resp := httptest.NewRecorder()
+	if _, err := a.srv.Txn(resp, req); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if resp.Code != 405 {
+		t.Fatalf("expected 405, got %d", resp.Code)
+	}
 }
 
 func TestTxnEndpoint_Bad_Size_Item(t *testing.T) {
-	httpTest(t, func(srv *HTTPServer) {
-		buf := bytes.NewBuffer([]byte(fmt.Sprintf(`
+	a := NewTestAgent(t, nextConfig())
+	defer a.Shutdown()
+
+	buf := bytes.NewBuffer([]byte(fmt.Sprintf(`
 [
     {
         "KV": {
@@ -56,21 +60,22 @@ func TestTxnEndpoint_Bad_Size_Item(t *testing.T) {
     }
 ]
 `, strings.Repeat("bad", 2*maxKVSize))))
-		req, _ := http.NewRequest("PUT", "/v1/txn", buf)
-		resp := httptest.NewRecorder()
-		if _, err := srv.Txn(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 413 {
-			t.Fatalf("expected 413, got %d", resp.Code)
-		}
-	})
+	req, _ := http.NewRequest("PUT", "/v1/txn", buf)
+	resp := httptest.NewRecorder()
+	if _, err := a.srv.Txn(resp, req); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if resp.Code != 413 {
+		t.Fatalf("expected 413, got %d", resp.Code)
+	}
 }
 
 func TestTxnEndpoint_Bad_Size_Net(t *testing.T) {
-	httpTest(t, func(srv *HTTPServer) {
-		value := strings.Repeat("X", maxKVSize/2)
-		buf := bytes.NewBuffer([]byte(fmt.Sprintf(`
+	a := NewTestAgent(t, nextConfig())
+	defer a.Shutdown()
+
+	value := strings.Repeat("X", maxKVSize/2)
+	buf := bytes.NewBuffer([]byte(fmt.Sprintf(`
 [
     {
         "KV": {
@@ -95,20 +100,21 @@ func TestTxnEndpoint_Bad_Size_Net(t *testing.T) {
     }
 ]
 `, value, value, value)))
-		req, _ := http.NewRequest("PUT", "/v1/txn", buf)
-		resp := httptest.NewRecorder()
-		if _, err := srv.Txn(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 413 {
-			t.Fatalf("expected 413, got %d", resp.Code)
-		}
-	})
+	req, _ := http.NewRequest("PUT", "/v1/txn", buf)
+	resp := httptest.NewRecorder()
+	if _, err := a.srv.Txn(resp, req); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if resp.Code != 413 {
+		t.Fatalf("expected 413, got %d", resp.Code)
+	}
 }
 
 func TestTxnEndpoint_Bad_Size_Ops(t *testing.T) {
-	httpTest(t, func(srv *HTTPServer) {
-		buf := bytes.NewBuffer([]byte(fmt.Sprintf(`
+	a := NewTestAgent(t, nextConfig())
+	defer a.Shutdown()
+
+	buf := bytes.NewBuffer([]byte(fmt.Sprintf(`
 [
     %s
     {
@@ -120,23 +126,25 @@ func TestTxnEndpoint_Bad_Size_Ops(t *testing.T) {
     }
 ]
 `, strings.Repeat(`{ "KV": { "Verb": "get", "Key": "key" } },`, 2*maxTxnOps))))
-		req, _ := http.NewRequest("PUT", "/v1/txn", buf)
-		resp := httptest.NewRecorder()
-		if _, err := srv.Txn(resp, req); err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if resp.Code != 413 {
-			t.Fatalf("expected 413, got %d", resp.Code)
-		}
-	})
+	req, _ := http.NewRequest("PUT", "/v1/txn", buf)
+	resp := httptest.NewRecorder()
+	if _, err := a.srv.Txn(resp, req); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if resp.Code != 413 {
+		t.Fatalf("expected 413, got %d", resp.Code)
+	}
 }
 
 func TestTxnEndpoint_KV_Actions(t *testing.T) {
-	httpTest(t, func(srv *HTTPServer) {
+	t.Run("", func(t *testing.T) {
+		a := NewTestAgent(t, nextConfig())
+		defer a.Shutdown()
+
 		// Make sure all incoming fields get converted properly to the internal
 		// RPC format.
 		var index uint64
-		id := makeTestSession(t, srv)
+		id := makeTestSession(t, a.srv)
 		{
 			buf := bytes.NewBuffer([]byte(fmt.Sprintf(`
 [
@@ -159,7 +167,7 @@ func TestTxnEndpoint_KV_Actions(t *testing.T) {
 `, id)))
 			req, _ := http.NewRequest("PUT", "/v1/txn", buf)
 			resp := httptest.NewRecorder()
-			obj, err := srv.Txn(resp, req)
+			obj, err := a.srv.Txn(resp, req)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -231,7 +239,7 @@ func TestTxnEndpoint_KV_Actions(t *testing.T) {
 `))
 			req, _ := http.NewRequest("PUT", "/v1/txn", buf)
 			resp := httptest.NewRecorder()
-			obj, err := srv.Txn(resp, req)
+			obj, err := a.srv.Txn(resp, req)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -315,7 +323,7 @@ func TestTxnEndpoint_KV_Actions(t *testing.T) {
 `, index)))
 			req, _ := http.NewRequest("PUT", "/v1/txn", buf)
 			resp := httptest.NewRecorder()
-			obj, err := srv.Txn(resp, req)
+			obj, err := a.srv.Txn(resp, req)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -364,7 +372,10 @@ func TestTxnEndpoint_KV_Actions(t *testing.T) {
 	})
 
 	// Verify an error inside a transaction.
-	httpTest(t, func(srv *HTTPServer) {
+	t.Run("", func(t *testing.T) {
+		a := NewTestAgent(t, nextConfig())
+		defer a.Shutdown()
+
 		buf := bytes.NewBuffer([]byte(`
 [
     {
@@ -385,7 +396,7 @@ func TestTxnEndpoint_KV_Actions(t *testing.T) {
 `))
 		req, _ := http.NewRequest("PUT", "/v1/txn", buf)
 		resp := httptest.NewRecorder()
-		if _, err := srv.Txn(resp, req); err != nil {
+		if _, err := a.srv.Txn(resp, req); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 		if resp.Code != 409 {

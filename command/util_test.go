@@ -2,11 +2,9 @@ package command
 
 import (
 	"fmt"
-	"log"
 	"math/rand"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,27 +32,12 @@ func init() {
 type server struct {
 	agent    *agent.Agent
 	config   *agent.Config
-	http     *agent.HTTPServer
 	httpAddr string
 	dir      string
-	wg       sync.WaitGroup
-}
-
-func (s *server) Start() {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		if err := s.http.ListenAndServe(s.httpAddr); err != nil {
-			log.Print(err)
-			// a.agent.logger.Print(err)
-		}
-	}()
 }
 
 func (a *server) Shutdown() {
 	a.agent.Shutdown()
-	a.http.Shutdown()
-	a.wg.Wait()
 	os.RemoveAll(a.dir)
 }
 
@@ -93,16 +76,18 @@ func testAgentWithConfigReload(t *testing.T, cb func(c *agent.Config), reloadCh 
 	w := &server{
 		agent:    a,
 		config:   conf,
-		http:     agent.NewHTTPServer(a),
 		httpAddr: addr,
 		dir:      conf.DataDir,
 	}
-	w.Start()
 	return w
 }
 
+var port uint64 = 10000
+
 func nextConfig() *agent.Config {
-	idx := int(atomic.AddUint64(&offset, 1))
+	port := func() int {
+		return int(atomic.AddUint64(&port, 1))
+	}
 	conf := agent.DefaultConfig()
 
 	nodeID, err := uuid.GenerateUUID()
@@ -112,18 +97,19 @@ func nextConfig() *agent.Config {
 
 	conf.Bootstrap = true
 	conf.Datacenter = "dc1"
-	conf.NodeName = fmt.Sprintf("Node %d", idx)
+	conf.NodeName = fmt.Sprintf("Node %d", port())
 	conf.NodeID = types.NodeID(nodeID)
 	conf.BindAddr = "127.0.0.1"
 	conf.Server = true
 
 	conf.Version = version.Version
 
-	conf.Ports.HTTP = 10000 + 10*idx
-	conf.Ports.HTTPS = 10401 + 10*idx
-	conf.Ports.SerfLan = 10201 + 10*idx
-	conf.Ports.SerfWan = 10202 + 10*idx
-	conf.Ports.Server = 10300 + 10*idx
+	conf.Ports.DNS = port()
+	conf.Ports.HTTP = port()
+	conf.Ports.HTTPS = port()
+	conf.Ports.SerfLan = port()
+	conf.Ports.SerfWan = port()
+	conf.Ports.Server = port()
 
 	cons := consul.DefaultConfig()
 	conf.ConsulConfig = cons

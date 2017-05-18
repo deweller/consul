@@ -142,8 +142,15 @@ type Agent struct {
 	// outside of a unit test.
 	endpoints map[string]string
 
+	// dnsAddr contains the address the DNS server binds to.
+	dnsAddr net.Addr
+
 	// dnsServer provides the DNS API
 	dnsServers []*DNSServer
+
+	// httpAddrs contains the addresses per protocol the HTTP
+	// server should bind to.
+	httpAddrs map[string][]net.Addr
 
 	// httpServers provides the HTTP API on various endpoints
 	httpServers []*HTTPServer
@@ -152,9 +159,20 @@ type Agent struct {
 	wgServers sync.WaitGroup
 }
 
-// Create is used to create a new Agent. Returns
-// the agent or potentially an error.
+// Create returns a new running agent.
 func Create(c *Config, logOutput io.Writer, logWriter *logger.LogWriter, reloadCh chan chan error) (*Agent, error) {
+	a, err := NewAgent(c, logOutput, logWriter, reloadCh)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Start(); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// NewAgent returns a new unstarted but configured agent.
+func NewAgent(c *Config, logOutput io.Writer, logWriter *logger.LogWriter, reloadCh chan chan error) (*Agent, error) {
 	// Ensure we have a log sink
 	if logOutput == nil {
 		logOutput = os.Stderr
@@ -178,7 +196,6 @@ func Create(c *Config, logOutput io.Writer, logWriter *logger.LogWriter, reloadC
 
 	a := &Agent{
 		config:         c,
-		logger:         log.New(logOutput, "", log.LstdFlags),
 		logOutput:      logOutput,
 		logWriter:      logWriter,
 		checkReapAfter: make(map[types.CheckID]time.Duration),
@@ -192,6 +209,8 @@ func Create(c *Config, logOutput io.Writer, logWriter *logger.LogWriter, reloadC
 		reloadCh:       reloadCh,
 		shutdownCh:     make(chan struct{}),
 		endpoints:      make(map[string]string),
+		dnsAddr:        dnsAddr,
+		httpAddrs:      httpAddrs,
 	}
 	if err := a.resolveTmplAddrs(); err != nil {
 		return nil, err
@@ -209,14 +228,28 @@ func Create(c *Config, logOutput io.Writer, logWriter *logger.LogWriter, reloadC
 	if err := a.setupNodeID(c); err != nil {
 		return nil, fmt.Errorf("Failed to setup node ID: %v", err)
 	}
+	return a, nil
+}
+
+// Start runs the agent. When an error is returned
+// the agent is not usable.
+func (a *Agent) Start() error {
+	c := a.config
+
+	// set the logger
+	a.logger = log.New(a.logOutput, "", log.LstdFlags)
 
 	// Initialize the local state.
 	a.state.Init(c, a.logger)
 
 	// Setup either the client or the server.
 	if c.Server {
-		err = a.setupServer()
-		a.state.SetIface(a.delegate)
+		server, err := a.makeServer()
+		if err != nil {
+			return err
+		}
+		a.delegate = server
+		a.state.SetIface(server)
 
 		// Automatically register the "consul" service on server nodes
 		consulService := structs.NodeService{
@@ -228,22 +261,23 @@ func Create(c *Config, logOutput io.Writer, logWriter *logger.LogWriter, reloadC
 
 		a.state.AddService(&consulService, c.GetTokenForAgent())
 	} else {
-		err = a.setupClient()
-		a.state.SetIface(a.delegate)
-	}
-	if err != nil {
-		return nil, err
+		client, err := a.makeClient()
+		if err != nil {
+			return err
+		}
+		a.delegate = client
+		a.state.SetIface(client)
 	}
 
 	// Load checks/services/metadata.
 	if err := a.loadServices(c); err != nil {
-		return nil, err
+		return err
 	}
 	if err := a.loadChecks(c); err != nil {
-		return nil, err
+		return err
 	}
 	if err := a.loadMetadata(c); err != nil {
-		return nil, err
+		return err
 	}
 
 	// Start watching for critical services to deregister, based on their
@@ -259,25 +293,21 @@ func Create(c *Config, logOutput io.Writer, logWriter *logger.LogWriter, reloadC
 	}
 
 	// Write out the PID file if necessary.
-	err = a.storePid()
-	if err != nil {
-		return nil, err
+	if err := a.storePid(); err != nil {
+		return err
 	}
 
 	// start dns server
 	if c.Ports.DNS > 0 {
-		srv, err := NewDNSServer(a, &c.DNSConfig, logOutput, c.Domain, dnsAddr.String(), c.DNSRecursors)
+		srv, err := NewDNSServer(a, &c.DNSConfig, a.logOutput, c.Domain, a.dnsAddr.String(), c.DNSRecursors)
 		if err != nil {
-			return nil, fmt.Errorf("error starting DNS server: %s", err)
+			return fmt.Errorf("error starting DNS server: %s", err)
 		}
 		a.dnsServers = []*DNSServer{srv}
 	}
 
 	// start HTTP servers
-	if err := a.startHTTP(httpAddrs); err != nil {
-		return nil, err
-	}
-	return a, nil
+	return a.startHTTP(a.httpAddrs)
 }
 
 func (a *Agent) startHTTP(httpAddrs map[string][]net.Addr) error {
@@ -711,37 +741,35 @@ func (a *Agent) resolveTmplAddrs() error {
 }
 
 // setupServer is used to initialize the Consul server
-func (a *Agent) setupServer() error {
+func (a *Agent) makeServer() (*consul.Server, error) {
 	config, err := a.consulConfig()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := a.setupKeyrings(config); err != nil {
-		return fmt.Errorf("Failed to configure keyring: %v", err)
+		return nil, fmt.Errorf("Failed to configure keyring: %v", err)
 	}
 	server, err := consul.NewServer(config)
 	if err != nil {
-		return fmt.Errorf("Failed to start Consul server: %v", err)
+		return nil, fmt.Errorf("Failed to start Consul server: %v", err)
 	}
-	a.delegate = server
-	return nil
+	return server, nil
 }
 
 // setupClient is used to initialize the Consul client
-func (a *Agent) setupClient() error {
+func (a *Agent) makeClient() (*consul.Client, error) {
 	config, err := a.consulConfig()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := a.setupKeyrings(config); err != nil {
-		return fmt.Errorf("Failed to configure keyring: %v", err)
+		return nil, fmt.Errorf("Failed to configure keyring: %v", err)
 	}
 	client, err := consul.NewClient(config)
 	if err != nil {
-		return fmt.Errorf("Failed to start Consul client: %v", err)
+		return nil, fmt.Errorf("Failed to start Consul client: %v", err)
 	}
-	a.delegate = client
-	return nil
+	return client, nil
 }
 
 // makeRandomID will generate a random UUID for a node.

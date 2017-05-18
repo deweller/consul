@@ -11,11 +11,14 @@ import (
 
 func TestSnapshot(t *testing.T) {
 	var snap io.Reader
-	httpTest(t, func(srv *HTTPServer) {
+	t.Run("", func(t *testing.T) {
+		a := NewTestAgent(t, nextConfig())
+		defer a.Shutdown()
+
 		body := bytes.NewBuffer(nil)
 		req, _ := http.NewRequest("GET", "/v1/snapshot?token=root", body)
 		resp := httptest.NewRecorder()
-		if _, err := srv.Snapshot(resp, req); err != nil {
+		if _, err := a.srv.Snapshot(resp, req); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 		snap = resp.Body
@@ -34,10 +37,13 @@ func TestSnapshot(t *testing.T) {
 		}
 	})
 
-	httpTest(t, func(srv *HTTPServer) {
+	t.Run("", func(t *testing.T) {
+		a := NewTestAgent(t, nextConfig())
+		defer a.Shutdown()
+
 		req, _ := http.NewRequest("PUT", "/v1/snapshot?token=root", snap)
 		resp := httptest.NewRecorder()
-		if _, err := srv.Snapshot(resp, req); err != nil {
+		if _, err := a.srv.Snapshot(resp, req); err != nil {
 			t.Fatalf("err: %v", err)
 		}
 	})
@@ -45,31 +51,40 @@ func TestSnapshot(t *testing.T) {
 
 func TestSnapshot_Options(t *testing.T) {
 	for _, method := range []string{"GET", "PUT"} {
-		httpTest(t, func(srv *HTTPServer) {
+		t.Run("", func(t *testing.T) {
+			a := NewTestAgent(t, nextConfig())
+			defer a.Shutdown()
+
 			body := bytes.NewBuffer(nil)
 			req, _ := http.NewRequest(method, "/v1/snapshot?token=anonymous", body)
 			resp := httptest.NewRecorder()
-			_, err := srv.Snapshot(resp, req)
+			_, err := a.srv.Snapshot(resp, req)
 			if err == nil || !strings.Contains(err.Error(), "Permission denied") {
 				t.Fatalf("err: %v", err)
 			}
 		})
 
-		httpTest(t, func(srv *HTTPServer) {
+		t.Run("", func(t *testing.T) {
+			a := NewTestAgent(t, nextConfig())
+			defer a.Shutdown()
+
 			body := bytes.NewBuffer(nil)
 			req, _ := http.NewRequest(method, "/v1/snapshot?dc=nope", body)
 			resp := httptest.NewRecorder()
-			_, err := srv.Snapshot(resp, req)
+			_, err := a.srv.Snapshot(resp, req)
 			if err == nil || !strings.Contains(err.Error(), "No path to datacenter") {
 				t.Fatalf("err: %v", err)
 			}
 		})
 
-		httpTest(t, func(srv *HTTPServer) {
+		t.Run("", func(t *testing.T) {
+			a := NewTestAgent(t, nextConfig())
+			defer a.Shutdown()
+
 			body := bytes.NewBuffer(nil)
 			req, _ := http.NewRequest(method, "/v1/snapshot?token=root&stale", body)
 			resp := httptest.NewRecorder()
-			_, err := srv.Snapshot(resp, req)
+			_, err := a.srv.Snapshot(resp, req)
 			if method == "GET" {
 				if err != nil {
 					t.Fatalf("err: %v", err)
@@ -84,11 +99,14 @@ func TestSnapshot_Options(t *testing.T) {
 }
 
 func TestSnapshot_BadMethods(t *testing.T) {
-	httpTest(t, func(srv *HTTPServer) {
+	t.Run("", func(t *testing.T) {
+		a := NewTestAgent(t, nextConfig())
+		defer a.Shutdown()
+
 		body := bytes.NewBuffer(nil)
 		req, _ := http.NewRequest("POST", "/v1/snapshot", body)
 		resp := httptest.NewRecorder()
-		_, err := srv.Snapshot(resp, req)
+		_, err := a.srv.Snapshot(resp, req)
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
@@ -97,11 +115,14 @@ func TestSnapshot_BadMethods(t *testing.T) {
 		}
 	})
 
-	httpTest(t, func(srv *HTTPServer) {
+	t.Run("", func(t *testing.T) {
+		a := NewTestAgent(t, nextConfig())
+		defer a.Shutdown()
+
 		body := bytes.NewBuffer(nil)
 		req, _ := http.NewRequest("DELETE", "/v1/snapshot", body)
 		resp := httptest.NewRecorder()
-		_, err := srv.Snapshot(resp, req)
+		_, err := a.srv.Snapshot(resp, req)
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}

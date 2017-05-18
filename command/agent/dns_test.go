@@ -34,35 +34,34 @@ func makeDNSServer(t *testing.T) (string, *DNSServer) {
 	return makeDNSServerConfig(t, nil, nil)
 }
 
-func makeDNSServerConfig(
-	t *testing.T,
-	agentFn func(c *Config),
-	dnsFn func(*DNSConfig)) (string, *DNSServer) {
+func makeDNSServerConfig(t *testing.T, agentFn func(c *Config), dnsFn func(*DNSConfig)) (string, *DNSServer) {
+	t.Fatal("needs refactoring")
+	return "", nil
 	// Create the configs and apply the functions
-	agentConf := nextConfig()
-	if agentFn != nil {
-		agentFn(agentConf)
-	}
-	dnsConf := &DefaultConfig().DNSConfig
-	if dnsFn != nil {
-		dnsFn(dnsConf)
-	}
+	//agentConf := nextConfig()
+	//if agentFn != nil {
+	//	agentFn(agentConf)
+	//}
+	//dnsConf := &DefaultConfig().DNSConfig
+	//if dnsFn != nil {
+	//	dnsFn(dnsConf)
+	//}
 
-	// Add in the recursor if any
-	if r := agentConf.DNSRecursor; r != "" {
-		agentConf.DNSRecursors = append(agentConf.DNSRecursors, r)
-	}
+	//// Add in the recursor if any
+	//if r := agentConf.DNSRecursor; r != "" {
+	//	agentConf.DNSRecursors = append(agentConf.DNSRecursors, r)
+	//}
 
-	// Start the server
-	addr, _ := agentConf.ClientListener(agentConf.Addresses.DNS, agentConf.Ports.DNS)
-	dir, agent := makeAgent(t, agentConf)
-	server, err := NewDNSServer(agent, dnsConf, agent.logOutput,
-		agentConf.Domain, addr.String(), agentConf.DNSRecursors)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	//// Start the server
+	//addr, _ := agentConf.ClientListener(agentConf.Addresses.DNS, agentConf.Ports.DNS)
+	//dir, agent := makeAgent(t, agentConf)
+	//server, err := NewDNSServer(agent, dnsConf, agent.logOutput,
+	//	agentConf.Domain, addr.String(), agentConf.DNSRecursors)
+	//if err != nil {
+	//	t.Fatalf("err: %v", err)
+	//}
 
-	return dir, server
+	//return dir, server
 }
 
 // makeRecursor creates a generic DNS server which always returns
